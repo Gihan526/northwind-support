@@ -41,6 +41,48 @@ Full requirements are in **[`ASSIGNMENT_CANDIDATE.md`](ASSIGNMENT_CANDIDATE.md)*
 
 ---
 
+## Task 1 implementation
+
+**DEFECT-117 fixed.** The list effect depended only on search, page and page size, so
+dropdown changes on the same page never fetched; typing later fetched the previously selected
+filters. The hook now observes the complete filters object, requests non-search changes
+immediately, debounces search by 300 ms, and ignores responses for superseded filters.
+An optional `AbortSignal` is forwarded through the ticket API to fetch; the hook aborts pending
+requests on filter changes, reloads and unmount. Expected cancellations do not display errors.
+Adding a future filter does not require changing the effect's dependencies.
+
+Verify with `npm run test --workspace apps/web -- src/features/tickets/hooks/useTicketList.test.ts`.
+The tests exercise the real API client with mocked HTTP responses and assert the outgoing URLs;
+the status regression failed on the original code and passes on the fix. For a manual check,
+open browser Network, select **In progress**, type and clear a search, then change status again:
+dropdowns fetch immediately, while typing fetches only once it settles. Clear filters also fetches
+immediately.
+
+**Server-side filtering implemented.** `TicketQueries.ApplyFilters` composes `Where` predicates
+on the existing `IQueryable`, before `CountAsync`, sorting, `Skip` and `Take`. Status, priority,
+category, customer and agent are exact matches; unassigned-only means a null agent; trimmed
+search matches title, reference or customer name. Blank search is ignored. All supplied filters
+combine with AND, including contradictory agent and unassigned-only filters (zero matches).
+Search case sensitivity follows the database collation; no custom collation is imposed.
+To add SLA filtering in Task 2, extend the query/client contract and add its SQL-translatable
+predicate in `ApplyFilters`; counting and paging keep the same pipeline. No schema changes or
+new indexes were needed; the existing filter indexes remain in place.
+
+Verified on 12 October 2026: 47 backend tests and 20 web tests pass, plus ESLint, TypeScript and
+the web production build. The 17 new relational query tests use SQLite, covering exact matches,
+combined filters, all search targets, blanks, unassigned tickets, empty results and paging.
+A command interceptor checks that both count and page SQL contain the filter and that paging
+stays in SQL. Also checked 26 read-only API queries against the local SQL Server's 40 demo
+tickets: High returned 14, High + Open returned 3, and trimmed customer search returned 7,
+with correct counts/pages. Inspected EF SQL logs: predicates appeared in `COUNT(*)` and the
+page query before `ORDER BY` / `OFFSET ... FETCH`. Reproduce with `npm run api` and, for example,
+`GET /api/tickets?priority=High&status=Open&pageSize=2`.
+
+**AI usage and limitations:** Codex assisted with diagnosis, implementation and test generation;
+the tests were run against the original code to confirm failure before applying fixes. See
+`APPROACH.md` for decisions and verification. Task 1 is complete; Tasks 2-4, including SLA
+filtering, escalation and authentication, are not implemented yet.
+
 ## Quick start
 
 **Prerequisites:** .NET SDK 10 (`global.json`), Node.js 22 (`.nvmrc`; 20.19+ works), Docker.
@@ -87,7 +129,7 @@ Both pass on a clean checkout and neither needs a database.
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /api/tickets` | Paged list with `search`, `status`, `priority`, `categoryId`, `customerId`, `assignedAgentId`, `unassignedOnly`, `sortBy`, `sortDirection`. **Filters are accepted but not applied yet** (Task 1). |
+| `GET /api/tickets` | Paged list with database filtering by `search`, `status`, `priority`, `categoryId`, `customerId`, `assignedAgentId`, `unassignedOnly`, plus `sortBy` and `sortDirection`. |
 | `GET /api/tickets/{id}` | One ticket |
 | `POST /api/tickets` | Create a ticket |
 | `PATCH /api/tickets/{id}/status` · `/assignment` | Change status / assignee |
