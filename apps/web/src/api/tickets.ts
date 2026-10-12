@@ -37,8 +37,8 @@ function buildQuery(filters: TicketFilters): string {
 }
 
 export const ticketsApi = {
-  getTickets: (filters: TicketFilters) =>
-    request<PagedResult<TicketListItem>>(`/tickets?${buildQuery(filters)}`),
+  getTickets: (filters: TicketFilters, signal?: AbortSignal) =>
+    request<PagedResult<TicketListItem>>(`/tickets?${buildQuery(filters)}`, { signal }),
 
   getTicket: (id: number) => request<TicketDetail>(`/tickets/${id}`),
 
