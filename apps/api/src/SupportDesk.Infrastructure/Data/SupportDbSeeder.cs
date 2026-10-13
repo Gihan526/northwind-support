@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SupportDesk.Application.Abstractions;
 using SupportDesk.Domain.Aggregates.Agents;
@@ -17,14 +18,15 @@ namespace SupportDesk.Infrastructure.Data;
 /// Every aggregate is built through its own behaviour. The two historical values no behaviour
 /// produces - a ticket's last update and its due date - are set through EF Core directly.
 /// </remarks>
-public sealed class SupportDbSeeder(SupportDbContext db, IClock clock, ILogger<SupportDbSeeder> logger)
+public sealed class SupportDbSeeder(SupportDbContext db, IClock clock, IPasswordService passwords, IConfiguration configuration, ILogger<SupportDbSeeder> logger)
 {
     /// <summary>Seeds the database, unless it already has tickets in it.</summary>
     public async Task SeedAsync(CancellationToken ct = default)
     {
         if (await db.Set<Ticket>().AnyAsync(ct))
         {
-            logger.LogInformation("Seed data already present; skipping.");
+            await SeedPasswordsAsync(ct);
+            logger.LogInformation("Seed data already present; added any missing development credentials.");
             return;
         }
 
@@ -45,9 +47,20 @@ public sealed class SupportDbSeeder(SupportDbContext db, IClock clock, ILogger<S
         SeedTickets(now, customers, categories, agents);
         await db.SaveChangesAsync(ct);
 
+        await SeedPasswordsAsync(ct);
+
         logger.LogInformation(
             "Seeded {Categories} categories, {Customers} customers, {Agents} agents and {Tickets} tickets.",
             categories.Count, customers.Count, agents.Count, await db.Set<Ticket>().CountAsync(ct));
+    }
+
+    private async Task SeedPasswordsAsync(CancellationToken ct)
+    {
+        var password = configuration["DevelopmentSeed:AgentPassword"]
+            ?? throw new InvalidOperationException("DevelopmentSeed:AgentPassword is required for development seeding.");
+        var agents = await db.Set<Agent>().Where(agent => agent.PasswordHash == null).ToListAsync(ct);
+        foreach (var agent in agents) agent.SetPasswordHash(passwords.Hash(agent.Email, password));
+        if (agents.Count > 0) await db.SaveChangesAsync(ct);
     }
 
     private static List<Category> SeedCategories() =>

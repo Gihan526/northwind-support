@@ -150,3 +150,15 @@ export interface ProblemDetails {
   traceId?: string;
   errors?: Record<string, string[]>;
 }
+
+export interface SignedInAgent {
+  id: number;
+  fullName: string;
+  email: string;
+}
+
+export interface AuthSession {
+  accessToken: string;
+  expiresAtUtc: string;
+  agent: SignedInAgent;
+}

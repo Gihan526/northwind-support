@@ -1,3 +1,4 @@
+import { clearSession, getSession } from '../features/auth/session';
 import type { ProblemDetails } from '../types/api';
 
 /**
@@ -30,15 +31,17 @@ export class ApiError extends Error {
  * {@link ApiError} that callers can show to the user.
  */
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  headers.set('Content-Type', 'application/json');
+  const session = getSession();
+  if (session) headers.set('Authorization', `Bearer ${session.accessToken}`);
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+    headers,
   });
 
   if (!response.ok) {
+    if (response.status === 401) clearSession();
     const problem = await readProblem(response);
 
     throw new ApiError(

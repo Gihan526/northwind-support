@@ -7,39 +7,14 @@ and move them through their lifecycle.
 
 ---
 
-## The assignment
+Requirements: [ASSIGNMENT_CANDIDATE.md](ASSIGNMENT_CANDIDATE.md). Decisions: [APPROACH.md](APPROACH.md).
 
-You are joining a team that already has this app working. Complete the tasks **in order**.
-Full requirements are in **[`ASSIGNMENT_CANDIDATE.md`](ASSIGNMENT_CANDIDATE.md)**.
-
-| # | Task | Done looks like | Effort |
-| --- | --- | --- | --- |
-| 1 | **Fix a defect, add server-side filtering** | Root cause fixed with a regression test; every list filter applied in the database with a correct count | ~2.5 h |
-| 2 | **Ticket escalation & assignment** | Automatic triage on create, escalation with history, SLA status, UI for all of it | ~7 h |
-| 3 | **Login and authentication** | Agents sign in; API rejects unauthenticated calls; login UI | ~4 h |
-| 4 | **Dockerise the API** *(optional)* | `docker compose up` gives a migrated, seeded API with no baked-in secret | ~1.5 h |
-
-### Guidance
-
-- **Time: 2 days.** Honestly marking a task "not finished" beats rushing all of them.
-- **Fork** this repo to your own GitHub account and work there. **Do not push to the original.**
-- **AI tools are allowed.** You must understand and be able to defend every line you submit.
-- **Commit as you go** and keep the real history. Commit the Task 1 defect fix and the filtering
-  separately from each other and from the feature work. A single squashed commit is not accepted.
-- **Where the spec is ambiguous**, make a decision, write it down in the README, and move on.
-- **Out of scope:** registration, password reset, roles, OAuth/SSO, refresh tokens, MFA,
-  notifications, CI, caching, visual redesign. Mention them under *Known limitations* instead.
-
-### Submission
-
-1. Update this **README** with what you built, your design decisions (chosen, rejected and why),
-   the defect's root cause, dev login credentials, how to run and test it, AI usage, and known
-   limitations. A reviewer must be able to run it without asking you anything.
-2. Add an **APPROACH.md** explaining your approach and thought process for each task.
-3. Commit both, then send us the **link to your fork**, the **dev login credentials**, and a
-   **rough note of time spent** on what. (If the fork is private, add the reviewers as collaborators.)
-
----
+| Task | Status |
+| --- | --- |
+| 1: defect and SQL filtering | Complete; fixes committed separately |
+| 2: escalation and triage | Deferred |
+| 3: authentication | Implemented; token-derived escalation actor awaits Task 2 |
+| 4: API container (optional) | Pending; Compose runs SQL Server only |
 
 ## Task 1 implementation
 
@@ -68,20 +43,60 @@ To add SLA filtering in Task 2, extend the query/client contract and add its SQL
 predicate in `ApplyFilters`; counting and paging keep the same pipeline. No schema changes or
 new indexes were needed; the existing filter indexes remain in place.
 
-Verified on 12 October 2026: 47 backend tests and 20 web tests pass, plus ESLint, TypeScript and
-the web production build. The 17 new relational query tests use SQLite, covering exact matches,
-combined filters, all search targets, blanks, unassigned tickets, empty results and paging.
-A command interceptor checks that both count and page SQL contain the filter and that paging
-stays in SQL. Also checked 26 read-only API queries against the local SQL Server's 40 demo
-tickets: High returned 14, High + Open returned 3, and trimmed customer search returned 7,
-with correct counts/pages. Inspected EF SQL logs: predicates appeared in `COUNT(*)` and the
-page query before `ORDER BY` / `OFFSET ... FETCH`. Reproduce with `npm run api` and, for example,
+The regression tests failed before the fix. SQL capture checks filtered count/page queries,
+and Task 1 was also checked with 26 read-only requests against SQL Server's 40 demo tickets:
+High returned 14, High/Open 3, and trimmed customer search 7, with correct counts/pages.
+Predicates appeared before SQL paging. After signing in, try
 `GET /api/tickets?priority=High&status=Open&pageSize=2`.
 
-**AI usage and limitations:** Codex assisted with diagnosis, implementation and test generation;
-the tests were run against the original code to confirm failure before applying fixes. See
-`APPROACH.md` for decisions and verification. Task 1 is complete; Tasks 2-4, including SLA
-filtering, escalation and authentication, are not implemented yet.
+## Task 3: agent authentication
+
+Credentials are a nullable `PasswordHash` column on the existing Agent, added by the
+`AddAgentPasswordHash` migration. One agent is one account, so a separate Users table would
+add joins and setup without serving this assignment. `PasswordService` delegates salt/hash creation and verification to Microsoft's
+[Identity PasswordHasher](https://learn.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.identity.passwordhasher-1?view=aspnetcore-10.0); it never stores plain passwords. Existing demo databases get missing hashes on Development startup, while already
+set passwords stay unchanged. Inactive agents cannot sign in or continue using an old token.
+
+`POST /api/auth/login` accepts email/password and returns accessToken, expiresAtUtc and the
+agent's id/name/email. Unknown email, wrong password and inactive agent return the same 401
+and message. `GET /api/auth/me` returns the current agent. One fallback authorization policy
+protects all endpoints; login is explicitly anonymous and Development Swagger stays open.
+JWTs use HS256 and validate signature, issuer, audience, expiry and current active-agent status,
+with a 60-minute lifetime. Settings come from `Jwt` configuration / environment variables.
+
+**Local development login:** `alex.turner@northwind-support.example` / `Local_Dev_Login_123!`.
+The other active seeded agents share that local fixture password. The Development signing key
+is an obviously public local fixture in configuration; replace it for any real deployment.
+`.env.example` lists `Jwt__SigningKey`, issuer, audience, lifetime and the dev seed password.
+`dotnet run` does not load `.env` automatically: use the supplied Development config or export
+these keys / set them with .NET user-secrets. Production has no default signing key and fails
+startup without configuration. Hashes are generated at seed time, not committed to migrations.
+
+The login page validates fields, displays server errors and disables duplicate submission.
+Protected routes preserve the requested path/query/hash, then return there after sign-in.
+The header displays the agent and logout. Tokens stay **in memory only**; refresh requires
+sign-in again. This avoids persistent browser token storage, but XSS can still make requests
+through a signed-in app. The central API client attaches Bearer headers; any 401 clears the
+session, and the route guard redirects to login. Logout clears the client session; tokens
+already copied elsewhere expire naturally, because revocation/refresh tokens are out of scope.
+
+**Task 2 dependency:** escalation is currently deferred, so there is no escalation endpoint
+or actor field to change. Tokens already include the authenticated agent ID (`sub`) and name.
+When Task 2 is implemented, its handler must derive the actor from that verified identity,
+never an `escalatedBy` value supplied by the browser. AU-8 remains dependent on that endpoint.
+
+Verified on 13 October 2026: 64 backend checks and 28 frontend tests pass. TestServer exercises
+real HTTP middleware/controllers with SQLite: 401 without tokens, 200 after login, generic
+failures, expired/wrong-signature/issuer/audience tokens, deactivation, salted hashing and
+idempotent development seeding. Frontend tests cover validation, pending/rejection, returning
+to the requested page, headers, logout and 401 redirects. Also run lint, types, build and format.
+
+Chosen: existing agent storage, one hashing adapter, central auth policy and a small in-memory
+session. Rejected: a full Identity user-management system or third-party frontend auth state
+library for this scope. Production needs a real signing key, HTTPS and controlled migrations;
+OIDC / an HttpOnly-cookie design, rate limiting and lockout are outside this assessment.
+Codex assisted with implementation and tests; generated code was checked through the real
+HTTP pipeline. No fresh SQL Server runtime check was completed while Docker was unavailable.
 
 ## Quick start
 
@@ -129,13 +144,15 @@ Both pass on a clean checkout and neither needs a database.
 
 | Endpoint | Description |
 | --- | --- |
+| `POST /api/auth/login` | Agent sign-in, anonymous |
+| `GET /api/auth/me` | Current authenticated agent |
 | `GET /api/tickets` | Paged list with database filtering by `search`, `status`, `priority`, `categoryId`, `customerId`, `assignedAgentId`, `unassignedOnly`, plus `sortBy` and `sortDirection`. |
 | `GET /api/tickets/{id}` | One ticket |
 | `POST /api/tickets` | Create a ticket |
 | `PATCH /api/tickets/{id}/status` · `/assignment` | Change status / assignee |
 | `GET /api/customers` · `/api/agents` · `/api/categories` | Reference data |
 
-Errors are `ProblemDetails`: `400` validation, `404` not found, `409` conflict or business rule.
+API calls require a Bearer token except login. Errors are `ProblemDetails`: `400` validation, `404` not found, `409` conflict or business rule.
 
 **Seed data:** 5 categories, 6 customers (3 Premium), 6 agents (one inactive, one at their limit)
 and 40 tickets across every status, priority and SLA state.

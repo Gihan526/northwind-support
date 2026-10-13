@@ -1,4 +1,6 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { LoginPage } from './features/auth/LoginPage';
+import { RequireLogin } from './features/auth/RequireLogin';
 import { App } from './App';
 import { NotFoundPage } from './features/NotFoundPage';
 import { CustomerDetailPage } from './features/customers/CustomerDetailPage';
@@ -8,17 +10,21 @@ import { TicketDetailPage } from './features/tickets/TicketDetailPage';
 import { TicketListPage } from './features/tickets/TicketListPage';
 
 export const router = createBrowserRouter([
+  { path: '/login', element: <LoginPage /> },
   {
-    path: '/',
-    element: <App />,
-    children: [
-      { index: true, element: <Navigate to="/tickets" replace /> },
-      { path: 'tickets', element: <TicketListPage /> },
-      { path: 'tickets/new', element: <CreateTicketPage /> },
-      { path: 'tickets/:id', element: <TicketDetailPage /> },
-      { path: 'customers', element: <CustomerListPage /> },
-      { path: 'customers/:id', element: <CustomerDetailPage /> },
-      { path: '*', element: <NotFoundPage /> },
-    ],
+    element: <RequireLogin />,
+    children: [{
+      path: '/',
+      element: <App />,
+      children: [
+        { index: true, element: <Navigate to="/tickets" replace /> },
+        { path: 'tickets', element: <TicketListPage /> },
+        { path: 'tickets/new', element: <CreateTicketPage /> },
+        { path: 'tickets/:id', element: <TicketDetailPage /> },
+        { path: 'customers', element: <CustomerListPage /> },
+        { path: 'customers/:id', element: <CustomerDetailPage /> },
+        { path: '*', element: <NotFoundPage /> },
+      ],
+    }],
   },
 ]);

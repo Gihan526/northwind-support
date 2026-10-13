@@ -63,7 +63,52 @@ checks passed. Generated code was checked through executable tests and type/lint
 The candidate should
 review this explanation and code before submission and record their own decisions and time.
 
+## Task 3: authentication first
+
+Task 2 was deferred when the candidate switched to authentication. The checkout had returned
+to Task 1, so no discarded Task 2 code was restored. Kept Task 3 small: a password adapter,
+a controller for login/me, centralized JWT setup, and three frontend auth files.
+
+Read the backend in this order:
+
+1. `Agent.PasswordHash`: nullable credentials for an existing agent, added by migration.
+2. `PasswordService`: delegates both operations to Identity's vetted PasswordHasher.
+3. `SupportDbSeeder.SeedPasswordsAsync`: hashes the dev fixture for missing credentials only.
+4. `AuthController.Login`: find agent, reject every credential failure identically, issue JWT.
+5. `AuthenticationExtensions`: validate every token and centrally require authentication.
+6. `AuthController.Me`: load the agent using the verified token's `sub` claim.
+
+A column on Agent avoids a separate user model because accounts and agents have the same
+lifecycle here. The domain knows only an opaque hash; the application interface keeps the
+hashing library in Infrastructure. JWT handling stays in Presentation. Deactivated agents
+are rejected on each validated request, rather than waiting for their current token to expire.
+Expiry returned to the client is the token's actual expiry, including its second precision.
+
+Read the frontend as `session.ts` → `api/client.ts` → `RequireLogin` → `LoginPage` → `App`.
+The session module holds one typed value in memory and notifies React when it changes. The
+shared client attaches it to all calls and clears it on any 401; the route guard then redirects.
+Login preserves the internal destination and guards against external return targets. Used
+FormData and existing Field/ErrorMessage components to keep form state small. A refresh loses
+the session by design; persistence and an extra state library were rejected for this scope.
+
+Tests exercise the real auth middleware/controller pipeline with relational SQLite, including
+the full anonymous/authenticated flow and token rejection boundaries. A fake clock controls
+issued expiry. Hashing checks salted output and correct/incorrect verification. Development
+seed tests prove existing passwords stay unchanged and missing accounts get hashes even when
+tickets already exist. Frontend tests verify outgoing headers, protected navigation, logout,
+401 redirects, client validation and pending/error states. No external database is needed.
+
+Codex generated and verified this implementation. Context7 was unavailable, so Microsoft's
+official JWT/PasswordHasher documentation was checked. One precision detail was corrected:
+return the encoded token's actual expiry, rather than an unrounded timestamp from the clock.
+TypeScript also caught a browser-style selector option used in a Testing Library test;
+it was removed rather than suppressing the type error. A full Identity/user-management stack
+was rejected because the assignment excludes those features. Commits are made only when requested by the candidate.
+
 ## Remaining assignment work
 
-Task 1 is complete. Tasks 2, 3 and 4 have not been implemented. The future SLA filter cannot
-be exercised until Task 2 adds its query predicate and client contract field.
+Task 1 and the independent Task 3 authentication requirements are implemented. Task 2 remains
+deferred, including AU-8's token-derived escalation actor; there is no escalation endpoint yet.
+Use the verified `sub`/name claims when adding it. Task 4 and the optional report remain pending.
+The new credential migration still needs application against a running local SQL Server;
+Docker was unavailable during this run. Finish the deferred tasks before submission.
