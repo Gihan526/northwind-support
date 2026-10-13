@@ -144,9 +144,45 @@ translated the actual five SLA predicates through the SQL Server provider (inclu
 and FLOOR). EF generated the migration SQL and reported no pending model changes; this does
 not replace applying it to a live SQL Server database.
 
+## Task 4: a small container setup
+
+Chose a conventional two-stage Dockerfile: .NET 10 SDK restores/publishes, then ASP.NET runtime
+runs only the published output as its built-in app user. Restore inputs precede source COPY so
+ordinary C# changes do not invalidate NuGet restore. No extra tools or certificate setup are
+installed in the runtime. Context excludes React, tests, outputs, Git, environment files and
+certificate files. Removing appsettings.Development.json from publish output keeps host-local
+connection/JWT fixtures out of the final image. Runtime environment supplies those values and all seven SLA settings; `.env.example` lists them.
+
+Compose adds one API service on localhost:5080 and waits for SQL Server health. The API connection
+uses the service name, rather than blindly passing the host's localhost connection string from
+.env. Existing Development startup handles migrations and idempotent demo seeding. Production
+skips this and should apply reviewed migrations separately, once, before replicas start.
+
+A single small DatabaseHealthCheck uses EF CanConnectAsync with cancellation. Built-in health
+middleware returns only Healthy/Unhealthy with 200/503; endpoint AllowAnonymous overrides the
+central fallback policy. HTTP tests use real SQLite reachability and prove that other endpoints
+still require authentication. Rejected extra health-check packages and a controller containing
+SQL/configuration details. No frontend change is needed: the existing Vite proxy accepts the
+container target environment variable.
+
+Context7 returned an invalid-key error, so the official
+[ASP.NET health-check documentation](https://learn.microsoft.com/en-us/aspnet/core/host-and-deploy/health-checks?view=aspnetcore-10.0),
+[Microsoft non-root container guidance](https://devblogs.microsoft.com/dotnet/secure-your-container-build-and-publish-with-dotnet-8/)
+and [Compose startup-order documentation](https://docs.docker.com/compose/how-tos/startup-order/)
+were checked. Codex implemented the Docker setup and behavioural health tests. Compose syntax
+and Release publish pass; all 117 backend checks pass. After the candidate started Docker,
+the image built and an isolated empty-volume Compose project applied all three migrations and
+seeded 40 tickets. HTTP checks passed for health, authentication, all five SQL SLA filters,
+create priority/window/assignment, escalation history and a forged actor being ignored.
+The exact documented Vite command proxied login and ticket requests. A C# comment change reran
+publish but kept restore CACHED. The app user is UID 1654; the runtime excludes SDK/Development
+configuration. Measured ARM64 uncompressed sizes: API 331.3 MiB versus SDK 929.1 MiB.
+Only the temporary project/volume was removed. Normal Compose startup then upgraded the
+existing database and retained its 40 tickets; health, login, history, all SLA filters and the
+Vite proxy passed there as well.
+
 ## Remaining assignment work
 
-Tasks 1–3 are implemented, including AU-8. Task 4 remains required; the SLA summary report is
-optional and unimplemented. The new migrations still need application against a running local
-SQL Server because Docker was unavailable. Finish Task 4, verify startup/migrations, and
-record candidate time before submission. Commits are made only when requested.
+Tasks 1–4 are implemented and verified. Review the code, commit/push when requested, and
+record candidate time before submission.
+The SLA summary report is optional and unimplemented. Commits are made only when requested.

@@ -34,6 +34,8 @@ builder.Services.AddSingleton(sla);
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddAgentAuthentication(builder.Configuration);
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseHealthCheck>("database", timeout: TimeSpan.FromSeconds(5));
 
 var app = builder.Build();
 
@@ -53,5 +55,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHealthChecks("/health").AllowAnonymous();
 
 app.Run();
