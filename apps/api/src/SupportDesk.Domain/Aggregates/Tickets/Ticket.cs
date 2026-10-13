@@ -43,6 +43,9 @@ public sealed class Ticket : AggregateRoot
     /// <summary>When the team has committed to responding by. Null when no SLA applies.</summary>
     public DateTime? DueAtUtc { get; private set; }
 
+    // Keep the actual window, so escalation/configuration changes cannot distort its timing.
+    public double SlaWindowMilliseconds { get; private set; }
+
     public DateTime? ResolvedAtUtc { get; private set; }
 
     /// <summary>True while the ticket still needs work from an agent.</summary>
@@ -110,5 +113,34 @@ public sealed class Ticket : AggregateRoot
     {
         AssignedAgentId = agentId;
         UpdatedAtUtc = nowUtc;
+    }
+
+    public void ApplyTriage(int? agentId, TimeSpan window, DateTime nowUtc)
+    {
+        AssignedAgentId = agentId;
+        SlaWindowMilliseconds = window.TotalMilliseconds;
+        DueAtUtc = nowUtc.Add(window);
+        UpdatedAtUtc = nowUtc;
+    }
+
+    public TicketPriority GetEscalatedPriority()
+    {
+        if (!IsOpen) throw new BusinessRuleViolationException($"{Status} tickets cannot be escalated.");
+        return Priority switch
+        {
+            TicketPriority.Low => TicketPriority.Medium,
+            TicketPriority.Medium => TicketPriority.High,
+            TicketPriority.High => TicketPriority.Critical,
+            _ => throw new BusinessRuleViolationException("Critical tickets cannot be escalated.")
+        };
+    }
+
+    public TicketEscalation Escalate(int? agentId, TimeSpan window, string reason, string actor, DateTime nowUtc)
+    {
+        var next = GetEscalatedPriority();
+        var row = new TicketEscalation(Id, Priority, next, AssignedAgentId, agentId, DueAtUtc, nowUtc.Add(window), reason, actor, nowUtc);
+        Priority = next;
+        ApplyTriage(agentId, window, nowUtc);
+        return row;
     }
 }

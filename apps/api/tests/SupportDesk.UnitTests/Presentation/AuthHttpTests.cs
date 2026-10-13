@@ -4,6 +4,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
@@ -16,7 +18,9 @@ using SupportDesk.Application.Abstractions;
 using SupportDesk.Application.Contracts.Auth;
 using SupportDesk.Application.Contracts.Common;
 using SupportDesk.Application.Contracts.Tickets;
+using SupportDesk.Application.Services;
 using SupportDesk.Domain.Aggregates.Agents;
+using SupportDesk.Domain.Aggregates.Tickets;
 using SupportDesk.Domain.Repositories;
 using SupportDesk.Infrastructure.Data;
 using SupportDesk.Infrastructure.Queries;
@@ -50,13 +54,19 @@ public sealed class AuthHttpTests : IAsyncLifetime
         builder.Configuration["Jwt:SigningKey"] = Key;
         builder.Configuration["DevelopmentSeed:AgentPassword"] = "TestOnly_Seed_123!";
         builder.Services.AddControllers(options => options.Filters.Add<ValidationFilter>())
-            .AddApplicationPart(typeof(AuthController).Assembly);
+            .AddApplicationPart(typeof(AuthController).Assembly)
+            .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+        builder.Services.AddSingleton(new SlaSettings());
         builder.Services.AddApplication();
         builder.Services.AddDbContext<SupportDbContext>(options => options.UseSqlite(_connection));
         builder.Services.AddSingleton<IClock>(_clock);
         builder.Services.AddSingleton<IPasswordService, PasswordService>();
         builder.Services.AddScoped<IAgentRepository, AgentRepository>();
         builder.Services.AddScoped<ITicketQueries, TicketQueries>();
+        builder.Services.AddScoped<ITicketRepository, TicketRepository>();
+        builder.Services.AddScoped<ICustomerRepository, CustomerRepository>();
+        builder.Services.AddScoped<ICategoryRepository, CategoryRepository>();
+        builder.Services.AddScoped<IUnitOfWork>(services => services.GetRequiredService<SupportDbContext>());
         builder.Services.AddScoped<SupportDbSeeder>();
         builder.Services.AddAgentAuthentication(builder.Configuration);
         _app = builder.Build();
@@ -200,6 +210,71 @@ public sealed class AuthHttpTests : IAsyncLifetime
     {
         var response = await _client.PostAsJsonAsync("/api/auth/login", new LoginRequest("bad-email", ""));
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    private static readonly JsonSerializerOptions TicketJson = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    [Fact]
+    public async Task Escalation_RecordsTokenActorAndIgnoresForgedBodyActor()
+    {
+        await using var scope = _app.Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<SupportDbSeeder>().SeedAsync();
+        var login = await LoginAsync();
+        _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+        var result = await _client.PostAsJsonAsync("/api/tickets/14/escalate",
+            new { reason = "  Customer cannot work  ", escalatedBy = "Forged actor" });
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        var escalation = (await result.Content.ReadFromJsonAsync<EscalateTicketResponse>(TicketJson))!;
+        Assert.Equal($"Alex Turner (agent #{_agentId})", escalation.Escalation.EscalatedBy);
+        Assert.Equal("Customer cannot work", escalation.Escalation.Reason);
+        Assert.Equal(TicketPriority.Low, escalation.Escalation.FromPriority);
+        Assert.Equal(TicketPriority.Medium, escalation.Ticket.Priority);
+        Assert.Equal(_clock.UtcNow.AddHours(24), escalation.Ticket.DueAtUtc);
+        var history = await _client.GetFromJsonAsync<List<TicketEscalationDto>>("/api/tickets/14/escalations", TicketJson);
+        Assert.Equal(escalation.Escalation.Id, Assert.Single(history!).Id);
+    }
+
+    [Theory]
+    [InlineData("/api/tickets/14/escalate", 400, "abc")]
+    [InlineData("/api/tickets/999999/escalate", 404, "Valid reason")]
+    [InlineData("/api/tickets/6/escalate", 409, "Valid reason")]
+    [InlineData("/api/tickets/25/escalate", 409, "Valid reason")]
+    public async Task Escalation_HttpRejections(string path, int status, string reason)
+    {
+        await using var scope = _app.Services.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<SupportDbSeeder>().SeedAsync();
+        var login = await LoginAsync();
+        _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+        Assert.Equal(status, (int)(await _client.PostAsJsonAsync(path, new { reason })).StatusCode);
+    }
+
+    [Fact]
+    public async Task NewTicket_NoEligibleAgent_StillReturns201WithTriage()
+    {
+        await using var scope = _app.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<SupportDbContext>();
+        await scope.ServiceProvider.GetRequiredService<SupportDbSeeder>().SeedAsync();
+        // Only the signed-in test agent remains active; fill their exact capacity.
+        foreach (var agent in await db.Set<Agent>().Where(agent => agent.Id != _agentId).ToListAsync()) agent.Deactivate();
+        for (var i = 0; i < 10; i++)
+        {
+            var ticket = Ticket.Raise($"CAP-{i}", "Capacity test", "A ticket occupying an agent slot", 1, 1, TicketPriority.Low, _clock.UtcNow);
+            ticket.AssignTo(_agentId, _clock.UtcNow);
+            db.Add(ticket);
+        }
+        await db.SaveChangesAsync();
+        var login = await LoginAsync();
+        _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+        var response = await _client.PostAsJsonAsync("/api/tickets", new CreateTicketRequest("New customer issue", "Customer needs help with the portal", 1, 1, TicketPriority.High), TicketJson);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var result = (await response.Content.ReadFromJsonAsync<TicketDetailDto>(TicketJson))!;
+        Assert.Null(result.AssignedAgent);
+        Assert.Equal(TicketPriority.High, result.Priority);
+        Assert.Equal(_clock.UtcNow.AddHours(4), result.DueAtUtc);
+        Assert.Contains("Unassigned because", result.Triage!.AssignmentReason);
     }
 
     private async Task<LoginResponse> LoginAsync(string email = Email)

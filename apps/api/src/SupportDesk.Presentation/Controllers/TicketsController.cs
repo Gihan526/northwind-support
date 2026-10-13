@@ -1,8 +1,11 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
+using SupportDesk.Application.Abstractions;
 using SupportDesk.Application.Contracts.Common;
 using SupportDesk.Application.Contracts.Tickets;
 using SupportDesk.Application.Features.Tickets.Commands.AssignTicket;
 using SupportDesk.Application.Features.Tickets.Commands.ChangeTicketStatus;
+using SupportDesk.Application.Features.Tickets.Commands.EscalateTicket;
 using SupportDesk.Application.Features.Tickets.Commands.RaiseTicket;
 using SupportDesk.Application.Features.Tickets.Queries.GetTicket;
 using SupportDesk.Application.Features.Tickets.Queries.SearchTickets;
@@ -14,6 +17,25 @@ namespace SupportDesk.Presentation.Controllers;
 [Produces("application/json")]
 public sealed class TicketsController : ControllerBase
 {
+    [HttpPost("{id:int}/escalate")]
+    public Task<EscalateTicketResponse> Escalate(int id, EscalateTicketRequest request,
+        [FromServices] EscalateTicketCommandHandler handler, CancellationToken ct)
+    {
+        // The actor is from verified JWT claims; extra actor fields in JSON are ignored.
+        var actorId = User.FindFirstValue("sub")!;
+        var actor = $"{User.Identity!.Name} (agent #{actorId})";
+        if (actor.Length > 100) actor = $"Agent #{actorId}";
+        return handler.HandleAsync(id, request, actor, ct);
+    }
+
+    [HttpGet("{id:int}/escalations")]
+    public async Task<IReadOnlyList<TicketEscalationDto>> Escalations(int id,
+        [FromServices] GetTicketQueryHandler getTicket, [FromServices] ITicketQueries queries, CancellationToken ct)
+    {
+        await getTicket.HandleAsync(id, ct); // Unknown ticket = 404.
+        return await queries.GetEscalationsAsync(id, ct);
+    }
+
     /// <summary>Searches tickets with filters, sorting and paging.</summary>
     [HttpGet]
     public Task<PagedResult<TicketListItemDto>> Search(

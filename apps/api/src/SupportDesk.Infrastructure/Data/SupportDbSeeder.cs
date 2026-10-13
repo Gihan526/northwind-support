@@ -15,8 +15,7 @@ namespace SupportDesk.Infrastructure.Data;
 /// produce the same database.
 /// </summary>
 /// <remarks>
-/// Every aggregate is built through its own behaviour. The two historical values no behaviour
-/// produces - a ticket's last update and its due date - are set through EF Core directly.
+/// Due dates/status use domain behaviour; historical last-update timestamps use EF.
 /// </remarks>
 public sealed class SupportDbSeeder(SupportDbContext db, IClock clock, IPasswordService passwords, IConfiguration configuration, ILogger<SupportDbSeeder> logger)
 {
@@ -198,6 +197,8 @@ public sealed class SupportDbSeeder(SupportDbContext db, IClock clock, IPassword
                 ticket.AssignTo(agents[row.AgentIndex.Value - 1].Id, createdAtUtc);
             }
 
+            ticket.ApplyTriage(ticket.AssignedAgentId, TimeSpan.FromMinutes(row.SlaWindowMinutes), createdAtUtc);
+
             if (row.Status != TicketStatus.New)
             {
                 // Resolving or closing stamps the resolution time; open statuses clear it.
@@ -207,7 +208,6 @@ public sealed class SupportDbSeeder(SupportDbContext db, IClock clock, IPassword
             var entry = db.Add(ticket);
             entry.Property(t => t.UpdatedAtUtc).CurrentValue =
                 createdAtUtc.AddMinutes(row.ResolvedAfterMinutes ?? row.CreatedMinutesAgo / 2);
-            entry.Property(t => t.DueAtUtc).CurrentValue = createdAtUtc.AddMinutes(row.SlaWindowMinutes);
         }
     }
 

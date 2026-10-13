@@ -105,10 +105,48 @@ TypeScript also caught a browser-style selector option used in a Testing Library
 it was removed rather than suppressing the type error. A full Identity/user-management stack
 was rejected because the assignment excludes those features. Commits are made only when requested by the candidate.
 
+## Task 2: shared decisions, explicit domain changes
+
+Read `TicketTriageService` first: `ForCreateAsync` chooses priority, `CalculateWindow` reads
+configuration, and `ChooseAgent` filters eligibility and orders workload/ID. `DecideAsync`
+combines the facts and explanations. The existing ticket query supplies workload/specialization
+facts in one database round trip; no new repository or framework was introduced.
+
+Then read the create handler and `EscalateTicketCommandHandler`. They load facts, call triage,
+apply the domain change, and save through the existing unit of work. `Ticket.Escalate` checks
+state and creates the before/after snapshot before changing the ticket. The controller obtains
+the actor from verified JWT claims, never from request JSON. Excluding the existing ticket
+from capacity checks lets an agent keep a slot they already occupy.
+
+The actual SLA window is stored separately from its derived status, because escalation resets
+its start time and configuration can change later. `SlaEvaluator` describes the display rules;
+`ApplySlaFilter` expresses those cases in SQL before count/paging. Both use the same captured
+clock and inclusive risk boundary, with millisecond rounding matching the mapped timestamps.
+The history index starts with TicketId and then descending time/ID for stable newest-first
+reads. Restricted FKs plus private setters and context save guards preserve history through EF.
+The migration also adopts a matching table/window column left in a previous local trial,
+without clearing data or altering old migration files.
+
+The frontend uses one new panel and the existing data hook/Field/ErrorMessage components.
+FormData keeps form state small. Success updates the displayed ticket and reloads history;
+409 keeps the displayed ticket and reason unchanged. Critical/finished tickets hide the form.
+The existing SLA component now labels every state and is reused after create.
+
+Codex assisted with code and behavioural tests. Accepted the shared-service approach; rejected
+extra per-rule classes and a separate history repository. HTTP tests verify the actual
+controller/auth/validation flow, including a forged actor being ignored and unassigned create
+still returning 201. Query tests check SQL, count/paging, risk boundaries and history order.
+Frontend tests cover rejected/pending/successful escalation and every SLA label. All 115
+backend and 42 frontend checks pass, as do web lint/types/build. Direct SQL history edits and
+simultaneous capacity/escalation races remain limitations; they need database permissions and
+concurrency controls in production rather than extra assignment scope. An offline check also
+translated the actual five SLA predicates through the SQL Server provider (including DATEADD
+and FLOOR). EF generated the migration SQL and reported no pending model changes; this does
+not replace applying it to a live SQL Server database.
+
 ## Remaining assignment work
 
-Task 1 and the independent Task 3 authentication requirements are implemented. Task 2 remains
-deferred, including AU-8's token-derived escalation actor; there is no escalation endpoint yet.
-Use the verified `sub`/name claims when adding it. Task 4 and the optional report remain pending.
-The new credential migration still needs application against a running local SQL Server;
-Docker was unavailable during this run. Finish the deferred tasks before submission.
+Tasks 1–3 are implemented, including AU-8. Task 4 remains required; the SLA summary report is
+optional and unimplemented. The new migrations still need application against a running local
+SQL Server because Docker was unavailable. Finish Task 4, verify startup/migrations, and
+record candidate time before submission. Commits are made only when requested.

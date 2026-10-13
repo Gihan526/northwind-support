@@ -2,6 +2,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ErrorMessage } from '../../components/ErrorMessage';
 import { Spinner } from '../../components/Spinner';
 import { useReferenceData } from '../../hooks/useReferenceData';
+import { EscalationPanel } from './components/EscalationPanel';
 import { AssignAgentControl } from './components/AssignAgentControl';
 import { StatusActions } from './components/StatusActions';
 import { TicketSummary } from './components/TicketSummary';
@@ -51,6 +52,7 @@ export function TicketDetailPage() {
           </div>
 
           <StatusActions ticket={ticket} onUpdated={setData} />
+          <EscalationPanel key={ticket.id} ticket={ticket} onUpdated={setData} />
         </div>
 
         <aside className="detail-layout__side">

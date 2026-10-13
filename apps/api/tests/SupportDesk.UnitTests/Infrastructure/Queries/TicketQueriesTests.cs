@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using SupportDesk.Application.Contracts.Tickets;
+using SupportDesk.Application.Services;
 using SupportDesk.Domain.Aggregates.Agents;
 using SupportDesk.Domain.Aggregates.Categories;
 using SupportDesk.Domain.Aggregates.Customers;
@@ -227,6 +228,110 @@ public sealed class TicketQueriesTests : IAsyncLifetime
         Assert.Empty(result.Items);
         Assert.Equal(0, result.TotalCount);
         Assert.Equal(0, result.TotalPages);
+    }
+
+    [Theory]
+    [InlineData(SlaStatus.NotApplicable)]
+    [InlineData(SlaStatus.WithinSla)]
+    [InlineData(SlaStatus.AtRisk)]
+    [InlineData(SlaStatus.Breached)]
+    [InlineData(SlaStatus.Met)]
+    public async Task SlaFilter_CountsAndPagesInSql(SlaStatus status)
+    {
+        var now = FixedClock.DefaultNow;
+        AddSla("SLA-none", now, null);
+        AddSla("SLA-within", now.AddHours(-2), TimeSpan.FromHours(4));
+        AddSla("SLA-risk", now.AddHours(-3), TimeSpan.FromHours(4));
+        AddSla("SLA-due", now.AddHours(-4), TimeSpan.FromHours(4));
+        AddSla("SLA-late", now.AddHours(-4).AddMilliseconds(-1), TimeSpan.FromHours(4));
+        AddSla("SLA-met", now.AddHours(-8), TimeSpan.FromHours(4), now.AddHours(-4));
+        AddSla("SLA-resolved-late", now.AddHours(-8), TimeSpan.FromHours(4), now.AddHours(-4).AddMilliseconds(1));
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var all = await _queries.GetPagedAsync(new TicketQuery { Search = "SLA-" }, default);
+        var expected = all.Items.Count(ticket => ticket.SlaStatus == status);
+        _sql.Commands.Clear();
+        var filtered = await _queries.GetPagedAsync(new TicketQuery { Search = "SLA-", SlaStatus = status, PageSize = 1 }, default);
+        Assert.True(expected > 0);
+        Assert.Equal(expected, filtered.TotalCount);
+        Assert.Equal(expected, filtered.TotalPages);
+        Assert.Equal(status, Assert.Single(filtered.Items).SlaStatus);
+        Assert.Equal(2, _sql.Commands.Count);
+        Assert.All(_sql.Commands, sql => { Assert.Contains("WHERE", sql); Assert.Contains("DueAtUtc", sql); });
+        Assert.Contains("COUNT(*)", _sql.Commands[0]);
+        Assert.Contains("LIMIT", _sql.Commands[1]);
+        Assert.Empty(_db.ChangeTracker.Entries());
+    }
+
+    [Theory]
+    [InlineData(-1, SlaStatus.WithinSla)]
+    [InlineData(0, SlaStatus.AtRisk)]
+    [InlineData(1, SlaStatus.AtRisk)]
+    public async Task SlaFilter_MillisecondRiskBoundary(int milliseconds, SlaStatus expected)
+    {
+        AddSla("BOUNDARY", FixedClock.DefaultNow.AddHours(-3).AddMilliseconds(-milliseconds), TimeSpan.FromHours(4));
+        await _db.SaveChangesAsync();
+        var result = await _queries.GetPagedAsync(new TicketQuery { Search = "BOUNDARY", SlaStatus = expected }, default);
+        Assert.Equal(expected, Assert.Single(result.Items).SlaStatus);
+    }
+
+    [Fact]
+    public async Task SlaFilter_ConfiguredThreshold()
+    {
+        AddSla("CUSTOM", FixedClock.DefaultNow.AddHours(-2), TimeSpan.FromHours(4));
+        await _db.SaveChangesAsync();
+        var queries = new TicketQueries(_db, new FixedClock(), new SlaSettings { AtRiskThresholdPercent = 50 });
+        var result = await queries.GetPagedAsync(new TicketQuery { Search = "CUSTOM", SlaStatus = SlaStatus.AtRisk }, default);
+        Assert.Equal(SlaStatus.AtRisk, Assert.Single(result.Items).SlaStatus);
+    }
+
+    [Fact]
+    public async Task AssignmentQuery_ExcludesResolvedAndCurrentTicket()
+    {
+        _db.Attach(_alex);
+        _alex.AddSpecialization(_billing.Id);
+        await _db.SaveChangesAsync();
+        var agents = await _queries.GetAssignmentCandidatesAsync(_billing.Id, null, default);
+        Assert.True(agents.Single(agent => agent.Id == _alex.Id).HasSpecialization);
+        Assert.False(agents.Single(agent => agent.Id == _sara.Id).HasSpecialization);
+        Assert.Equal(1, agents.Single(agent => agent.Id == _sara.Id).OpenTicketCount);
+        var id = await _db.Set<Ticket>().Where(ticket => ticket.Reference == "TCK-0042").Select(ticket => ticket.Id).SingleAsync();
+        agents = await _queries.GetAssignmentCandidatesAsync(_billing.Id, id, default);
+        Assert.Equal(0, agents.Single(agent => agent.Id == _sara.Id).OpenTicketCount);
+    }
+
+    [Fact]
+    public async Task History_NewestFirstAndImmutable()
+    {
+        var ticket = await _db.Set<Ticket>().SingleAsync(ticket => ticket.Reference == "TCK-0044");
+        ticket.ApplyTriage(_alex.Id, TimeSpan.FromHours(72), FixedClock.DefaultNow);
+        var first = ticket.Escalate(_sara.Id, TimeSpan.FromHours(24), "First reason", "Alex", FixedClock.DefaultNow);
+        var second = ticket.Escalate(null, TimeSpan.FromHours(8), "Second reason", "Sara", FixedClock.DefaultNow);
+        _db.AddRange(first, second);
+        await _db.SaveChangesAsync();
+        _db.ChangeTracker.Clear();
+        var history = await _queries.GetEscalationsAsync(ticket.Id, default);
+        Assert.Equal(new[] { second.Id, first.Id }, history.Select(row => row.Id));
+        Assert.Equal("Alex Turner", history[1].FromAgent!.FullName);
+        Assert.Equal("Sara Lindqvist", history[1].ToAgent!.FullName);
+        Assert.Null(history[0].ToAgent);
+        Assert.Empty(_db.ChangeTracker.Entries());
+        var row = await _db.Set<TicketEscalation>().FindAsync(first.Id);
+        _db.Entry(row!).Property(entry => entry.Reason).CurrentValue = "Edited reason";
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _db.SaveChangesAsync());
+        _db.ChangeTracker.Clear();
+        row = await _db.Set<TicketEscalation>().FindAsync(first.Id);
+        _db.Remove(row!);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _db.SaveChangesAsync());
+        Assert.Throws<InvalidOperationException>(() => _db.SaveChanges());
+    }
+
+    private void AddSla(string reference, DateTime created, TimeSpan? window, DateTime? resolved = null)
+    {
+        var ticket = Ticket.Raise(reference, reference, "SLA test description", _contoso.Id, _general.Id, TicketPriority.Medium, created);
+        if (window is not null) ticket.ApplyTriage(null, window.Value, created);
+        if (resolved is not null) ticket.ChangeStatus(TicketStatus.Resolved, resolved.Value);
+        _db.Add(ticket);
     }
 
     private void AddTicket(string reference, string title, TicketPriority priority, TicketStatus status,

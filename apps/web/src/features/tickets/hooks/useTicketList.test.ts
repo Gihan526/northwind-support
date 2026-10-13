@@ -33,6 +33,7 @@ describe('useTicketList', () => {
   it.each<[Partial<TicketFilters>, string, string]>([
     [{ status: 'InProgress' }, 'status', 'InProgress'],
     [{ priority: 'High' }, 'priority', 'High'],
+    [{ slaStatus: 'AtRisk' }, 'slaStatus', 'AtRisk'],
     [{ categoryId: 2 }, 'categoryId', '2'],
     [{ customerId: 3 }, 'customerId', '3'],
     [{ assignedAgentId: 4 }, 'assignedAgentId', '4'],

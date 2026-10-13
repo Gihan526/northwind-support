@@ -15,3 +15,6 @@ public sealed record UpdateTicketStatusRequest(TicketStatus Status);
 
 /// <summary>Body of PATCH /api/tickets/{id}/assignment. A null agent unassigns the ticket.</summary>
 public sealed record AssignTicketRequest(int? AgentId);
+
+// Actor comes from the verified token, never from this request.
+public sealed record EscalateTicketRequest(string Reason);

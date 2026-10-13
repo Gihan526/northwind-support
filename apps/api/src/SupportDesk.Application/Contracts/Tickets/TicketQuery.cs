@@ -22,6 +22,7 @@ public sealed record TicketQuery
     public TicketStatus? Status { get; init; }
 
     public TicketPriority? Priority { get; init; }
+    public SlaStatus? SlaStatus { get; init; }
 
     public int? CategoryId { get; init; }
 

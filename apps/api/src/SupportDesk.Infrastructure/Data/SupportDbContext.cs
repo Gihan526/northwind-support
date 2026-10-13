@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using SupportDesk.Domain.Aggregates.Tickets;
 using SupportDesk.Domain.Repositories;
 
 namespace SupportDesk.Infrastructure.Data;
@@ -10,6 +11,22 @@ namespace SupportDesk.Infrastructure.Data;
 /// </summary>
 public class SupportDbContext(DbContextOptions<SupportDbContext> options) : DbContext(options), IUnitOfWork
 {
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        ProtectHistory();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        ProtectHistory();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+    private void ProtectHistory()
+    {
+        if (ChangeTracker.Entries<TicketEscalation>().Any(entry => entry.State == EntityState.Modified || entry.State == EntityState.Deleted))
+            throw new InvalidOperationException("Escalation history is immutable.");
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(SupportDbContext).Assembly);

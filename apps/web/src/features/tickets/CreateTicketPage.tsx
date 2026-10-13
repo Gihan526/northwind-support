@@ -4,6 +4,7 @@ import { ErrorMessage } from '../../components/ErrorMessage';
 import { Spinner } from '../../components/Spinner';
 import { useReferenceData } from '../../hooks/useReferenceData';
 import type { TicketDetail } from '../../types/api';
+import { SlaCell } from './components/SlaCell';
 import { CreateTicketForm } from './components/CreateTicketForm';
 
 export function CreateTicketPage() {
@@ -33,6 +34,13 @@ export function CreateTicketPage() {
           <p>
             Raised <strong>{created.reference}</strong> for {created.customer.name}.
           </p>
+          <p>Priority: <strong>{created.priority}</strong>. Agent: <strong>{created.assignedAgent?.fullName ?? 'Unassigned'}</strong>.</p>
+          <SlaCell dueAtUtc={created.dueAtUtc} slaStatus={created.slaStatus} />
+          {created.triage && <ul>
+            <li>{created.triage.priorityReason}</li>
+            <li>{created.triage.slaWindowReason}</li>
+            <li>{created.triage.assignmentReason}</li>
+          </ul>}
           <div className="button-row">
             <button
               type="button"

@@ -12,9 +12,9 @@ Requirements: [ASSIGNMENT_CANDIDATE.md](ASSIGNMENT_CANDIDATE.md). Decisions: [AP
 | Task | Status |
 | --- | --- |
 | 1: defect and SQL filtering | Complete; fixes committed separately |
-| 2: escalation and triage | Deferred |
-| 3: authentication | Implemented; token-derived escalation actor awaits Task 2 |
-| 4: API container (optional) | Pending; Compose runs SQL Server only |
+| 2: escalation and triage | Implemented and tested; live SQL Server upgrade still to verify |
+| 3: authentication | Implemented, including token-derived escalation actor |
+| 4: API container | Pending; Compose runs SQL Server only |
 
 ## Task 1 implementation
 
@@ -24,14 +24,11 @@ filters. The hook now observes the complete filters object, requests non-search 
 immediately, debounces search by 300 ms, and ignores responses for superseded filters.
 An optional `AbortSignal` is forwarded through the ticket API to fetch; the hook aborts pending
 requests on filter changes, reloads and unmount. Expected cancellations do not display errors.
-Adding a future filter does not require changing the effect's dependencies.
 
 Verify with `npm run test --workspace apps/web -- src/features/tickets/hooks/useTicketList.test.ts`.
-The tests exercise the real API client with mocked HTTP responses and assert the outgoing URLs;
-the status regression failed on the original code and passes on the fix. For a manual check,
-open browser Network, select **In progress**, type and clear a search, then change status again:
-dropdowns fetch immediately, while typing fetches only once it settles. Clear filters also fetches
-immediately.
+Tests exercise the real API client with mocked HTTP responses; the status regression failed
+before the fix. Manually select **In progress**, type/clear search, then change status again:
+dropdowns fetch immediately, typing fetches once it settles. Clear filters also fetches immediately.
 
 **Server-side filtering implemented.** `TicketQueries.ApplyFilters` composes `Where` predicates
 on the existing `IQueryable`, before `CountAsync`, sorting, `Skip` and `Take`. Status, priority,
@@ -39,27 +36,72 @@ category, customer and agent are exact matches; unassigned-only means a null age
 search matches title, reference or customer name. Blank search is ignored. All supplied filters
 combine with AND, including contradictory agent and unassigned-only filters (zero matches).
 Search case sensitivity follows the database collation; no custom collation is imposed.
-To add SLA filtering in Task 2, extend the query/client contract and add its SQL-translatable
-predicate in `ApplyFilters`; counting and paging keep the same pipeline. No schema changes or
+Task 2 adds `slaStatus` to the query/client contract and composes `ApplySlaFilter` before
+counting; sorting and paging keep the same pipeline. No schema changes or
 new indexes were needed; the existing filter indexes remain in place.
 
-The regression tests failed before the fix. SQL capture checks filtered count/page queries,
-and Task 1 was also checked with 26 read-only requests against SQL Server's 40 demo tickets:
-High returned 14, High/Open 3, and trimmed customer search 7, with correct counts/pages.
-Predicates appeared before SQL paging. After signing in, try
-`GET /api/tickets?priority=High&status=Open&pageSize=2`.
+Relational regression tests failed before the fix and now capture filtered count/page SQL.
+Task 1 also passed 26 read-only requests against SQL Server's 40 demo tickets: High returned
+14, High/Open 3, and customer search 7, retaining correct counts/pages. Inspect EF logs for
+predicates before SQL paging; after sign-in try `GET /api/tickets?priority=High&status=Open&pageSize=2`.
+
+## Task 2: triage, escalation and SLA
+
+`TicketTriageService` shares create/escalate decisions in one place. Create uses requested
+priority (default Medium), overridden to Critical by the category flag. Standard windows are
+Critical 4 h, High 8 h, Medium 24 h and Low 72 h. Premium uses the configured multiplier
+(default half), with a 1 h floor. `Sla` configuration supplies windows, multiplier, floor and
+risk percentage; category flags supply specialist/forced-priority rules.
+
+Assignment requires an active agent, the category specialization when required, and spare
+capacity. Open excludes Resolved/Closed. Fewest open tickets wins, then lowest agent ID.
+No eligible agent gives a normal **201**, unassigned, with a triage explanation. Escalation
+keeps an eligible owner, otherwise repeats selection. We exclude the current ticket when
+checking escalation capacity: an agent at their limit can retain their existing slot.
+
+Escalation raises one level, recomputes due from injectable `IClock.UtcNow`, and saves the
+updated ticket and history together. Trimmed reasons must be 5–500 characters; Critical,
+Resolved and Closed return **409**. The detail panel validates input, handles pending/errors and refreshes ticket/history. Create shows the
+applied priority, owner, due date and explanations. One `SlaCell` labels all five SLA states;
+the list filter sends `slaStatus` immediately.
+
+SLA status is derived: no due date means No SLA; resolution on/before due means Met;
+late resolution or an unresolved ticket past due means Breached. At exactly due an unresolved
+ticket remains At risk; the risk boundary includes 25% remaining (configurable). Persisting
+`SlaWindowMilliseconds` preserves the actual window after escalation and later config changes.
+The migration backfills existing windows and adds `TicketEscalations` with restricted FKs,
+nullable before/after agents/dates and bounded reason/actor fields. Its composite index
+`(TicketId, EscalatedAtUtc DESC, Id DESC)` supports newest-first history, including time ties.
+History is immutable through EF. Migration guards adopt the matching schema left by a
+previous local trial without a data reset.
+
+Chose a shared decision service, the existing command/query separation, and repositories plus
+one unit of work for atomic writes. Rejected separate services/repositories for each small rule
+and duplicated create/escalate logic. Reads use projections and AsNoTracking; workload facts
+come from one database query. SLA predicates run before SQL count/sort/page, using one captured
+clock value. Tests check emitted relational SQL/counts. All five predicates also translate
+with the SQL Server provider offline; the migration script generates and matches the EF model.
+Live SQL Server execution remains unverified while Docker is unavailable.
+
+**Checks:** 115 backend and 42 frontend tests pass, covering windows/floor/flags, agent
+eligibility/ties, escalation snapshots/rejections, exact SLA boundaries, SQL filtering/history,
+JWT-derived actor, client validation, 409 preservation and all SLA labels. Web lint and build
+also pass. Run commands below; tests use SQLite/TestServer and need no Docker.
+
+**Known limitations:** simultaneous assignments/escalations have no concurrency token or
+capacity lock; production needs that protection. Direct SQL can bypass EF history guards.
+The optional SLA summary report is not implemented. Task 4 is still required and pending.
+SQL Server migration execution still needs a running Docker database.
 
 ## Task 3: agent authentication
 
 Credentials are a nullable `PasswordHash` column on the existing Agent, added by the
-`AddAgentPasswordHash` migration. One agent is one account, so a separate Users table would
-add joins and setup without serving this assignment. `PasswordService` delegates salt/hash creation and verification to Microsoft's
+`AddAgentPasswordHash` migration. An Agent column avoids an unnecessary Users table. `PasswordService` delegates salt/hash creation and verification to Microsoft's
 [Identity PasswordHasher](https://learn.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.identity.passwordhasher-1?view=aspnetcore-10.0); it never stores plain passwords. Existing demo databases get missing hashes on Development startup, while already
 set passwords stay unchanged. Inactive agents cannot sign in or continue using an old token.
 
 `POST /api/auth/login` accepts email/password and returns accessToken, expiresAtUtc and the
-agent's id/name/email. Unknown email, wrong password and inactive agent return the same 401
-and message. `GET /api/auth/me` returns the current agent. One fallback authorization policy
+agent's id/name/email. Unknown email, wrong password and inactive agent share the same 401/message. `GET /api/auth/me` returns the current agent. One fallback authorization policy
 protects all endpoints; login is explicitly anonymous and Development Swagger stays open.
 JWTs use HS256 and validate signature, issuer, audience, expiry and current active-agent status,
 with a 60-minute lifetime. Settings come from `Jwt` configuration / environment variables.
@@ -72,31 +114,22 @@ is an obviously public local fixture in configuration; replace it for any real d
 these keys / set them with .NET user-secrets. Production has no default signing key and fails
 startup without configuration. Hashes are generated at seed time, not committed to migrations.
 
-The login page validates fields, displays server errors and disables duplicate submission.
-Protected routes preserve the requested path/query/hash, then return there after sign-in.
-The header displays the agent and logout. Tokens stay **in memory only**; refresh requires
-sign-in again. This avoids persistent browser token storage, but XSS can still make requests
-through a signed-in app. The central API client attaches Bearer headers; any 401 clears the
-session, and the route guard redirects to login. Logout clears the client session; tokens
-already copied elsewhere expire naturally, because revocation/refresh tokens are out of scope.
+Login has validation, pending/error states and returns to the requested route. The header
+displays the agent and logout. Tokens stay **in memory only**; refresh requires
+sign-in again. This avoids persistent token storage, though XSS can still make authenticated requests. The central API client attaches Bearer headers; any 401 clears the
+session, and the route guard redirects to login. Copied tokens expire naturally; revocation/refresh tokens are out of scope.
 
-**Task 2 dependency:** escalation is currently deferred, so there is no escalation endpoint
-or actor field to change. Tokens already include the authenticated agent ID (`sub`) and name.
-When Task 2 is implemented, its handler must derive the actor from that verified identity,
-never an `escalatedBy` value supplied by the browser. AU-8 remains dependent on that endpoint.
+**Escalation actor:** the controller derives name and agent ID from the validated JWT.
+The browser sends only a reason; a forged `escalatedBy` field is ignored (AU-8).
 
-Verified on 13 October 2026: 64 backend checks and 28 frontend tests pass. TestServer exercises
-real HTTP middleware/controllers with SQLite: 401 without tokens, 200 after login, generic
-failures, expired/wrong-signature/issuer/audience tokens, deactivation, salted hashing and
-idempotent development seeding. Frontend tests cover validation, pending/rejection, returning
-to the requested page, headers, logout and 401 redirects. Also run lint, types, build and format.
-
-Chosen: existing agent storage, one hashing adapter, central auth policy and a small in-memory
-session. Rejected: a full Identity user-management system or third-party frontend auth state
-library for this scope. Production needs a real signing key, HTTPS and controlled migrations;
+Chose existing Agent storage and a small in-memory session; rejected a full Identity
+user-management system and extra frontend state library for this scope. Production needs a real signing key, HTTPS and controlled migrations;
 OIDC / an HttpOnly-cookie design, rate limiting and lockout are outside this assessment.
-Codex assisted with implementation and tests; generated code was checked through the real
-HTTP pipeline. No fresh SQL Server runtime check was completed while Docker was unavailable.
+Codex helped inspect, implement and test Tasks 1–3. Accepted composable query predicates
+and the shared triage service; rejected extra per-rule classes. Its first Task 1 cleanup
+introduced an ESLint ref warning, fixed by capturing the stable ref inside the effect.
+Executable HTTP/SQL tests and lint/types/build checked generated code. Detailed decisions:
+[APPROACH.md](APPROACH.md). Review the code and add your actual time breakdown before submission.
 
 ## Quick start
 
@@ -118,9 +151,6 @@ npm run web                   # terminal 2: React dev server
 
 In Development the API applies migrations and seeds demo data on startup. **Never commit real
 credentials.**
-
-**Visual Studio 2026:** run `npm run db:up`, open `SupportDesk.sln`, set
-**SupportDesk.Presentation** as the startup project, and press F5 on the **https** profile.
 
 ## Tests
 
@@ -146,9 +176,11 @@ Both pass on a clean checkout and neither needs a database.
 | --- | --- |
 | `POST /api/auth/login` | Agent sign-in, anonymous |
 | `GET /api/auth/me` | Current authenticated agent |
-| `GET /api/tickets` | Paged list with database filtering by `search`, `status`, `priority`, `categoryId`, `customerId`, `assignedAgentId`, `unassignedOnly`, plus `sortBy` and `sortDirection`. |
+| `GET /api/tickets` | Paged list with database filtering by `search`, `status`, `priority`, `categoryId`, `customerId`, `assignedAgentId`, `unassignedOnly`, `slaStatus`, plus `sortBy` and `sortDirection`. |
 | `GET /api/tickets/{id}` | One ticket |
-| `POST /api/tickets` | Create a ticket |
+| `POST /api/tickets` | Create and triage a ticket |
+| `POST /api/tickets/{id}/escalate` | Escalate with `{ "reason": "..." }`; actor from JWT |
+| `GET /api/tickets/{id}/escalations` | Immutable history, newest first |
 | `PATCH /api/tickets/{id}/status` · `/assignment` | Change status / assignee |
 | `GET /api/customers` · `/api/agents` · `/api/categories` | Reference data |
 

@@ -9,6 +9,7 @@ export const emptyFilters: TicketFilters = {
   search: '',
   status: undefined,
   priority: undefined,
+  slaStatus: undefined,
   categoryId: undefined,
   customerId: undefined,
   assignedAgentId: undefined,

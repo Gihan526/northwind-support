@@ -16,4 +16,6 @@ public interface ITicketQueries
 
     /// <summary>A customer's tickets, newest first.</summary>
     Task<IReadOnlyList<TicketListItemDto>> GetForCustomerAsync(int customerId, CancellationToken ct);
+    Task<IReadOnlyList<AssignmentCandidate>> GetAssignmentCandidatesAsync(int categoryId, int? excludedTicketId, CancellationToken ct);
+    Task<IReadOnlyList<TicketEscalationDto>> GetEscalationsAsync(int ticketId, CancellationToken ct);
 }

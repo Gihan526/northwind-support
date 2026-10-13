@@ -64,21 +64,25 @@ export interface TicketListItem {
   slaStatus: SlaStatus;
 }
 
-export interface TicketDetail {
-  id: number;
-  reference: string;
-  title: string;
+export interface TicketDetail extends TicketListItem {
   description: string;
-  status: TicketStatus;
-  priority: TicketPriority;
   customer: CustomerContact;
   category: CategoryOnTicket;
-  assignedAgent: AgentSummary | null;
-  createdAtUtc: string;
-  updatedAtUtc: string;
-  dueAtUtc: string | null;
-  resolvedAtUtc: string | null;
-  slaStatus: SlaStatus;
+  triage?: { priorityReason: string; slaWindowReason: string; assignmentReason: string } | null;
+}
+
+export interface TicketEscalation {
+  id: number;
+  ticketId: number;
+  fromPriority: TicketPriority;
+  toPriority: TicketPriority;
+  fromAgent: AgentSummary | null;
+  toAgent: AgentSummary | null;
+  fromDueAtUtc: string | null;
+  toDueAtUtc: string | null;
+  reason: string;
+  escalatedBy: string;
+  escalatedAtUtc: string;
 }
 
 /** Everything the ticket list screen can narrow the results by. */
@@ -86,6 +90,7 @@ export interface TicketFilters {
   search: string;
   status?: TicketStatus;
   priority?: TicketPriority;
+  slaStatus?: SlaStatus;
   categoryId?: number;
   customerId?: number;
   assignedAgentId?: number;

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using SupportDesk.Application.Abstractions;
 using SupportDesk.Application.Contracts.Common;
 using SupportDesk.Application.Contracts.Tickets;
+using SupportDesk.Application.Services;
 using SupportDesk.Domain.Aggregates.Agents;
 using SupportDesk.Domain.Aggregates.Categories;
 using SupportDesk.Domain.Aggregates.Customers;
@@ -14,18 +15,19 @@ namespace SupportDesk.Infrastructure.Queries;
 /// Ticket reads. Projected in the database and never tracked. Aggregates hold only each
 /// other's ids, so the customer, category and agent labels are joined in here, on the read side.
 /// </summary>
-public sealed class TicketQueries(SupportDbContext db, IClock clock) : ITicketQueries
+public sealed class TicketQueries(SupportDbContext db, IClock clock, SlaSettings? settings = null) : ITicketQueries
 {
+    private readonly SlaSettings _sla = settings ?? new SlaSettings();
+
     /// <remarks>
     /// Filters compose on the database query before counting, sorting and paging.
     /// </remarks>
     public async Task<PagedResult<TicketListItemDto>> GetPagedAsync(TicketQuery query, CancellationToken ct)
     {
+        var now = clock.UtcNow; // Same time for filtering and displayed status.
         var tickets = ApplyFilters(TicketsWithLabels(), query);
-
+        if (query.SlaStatus is { } status) tickets = ApplySlaFilter(tickets, status, now, _sla.AtRiskThresholdPercent);
         var totalCount = await tickets.CountAsync(ct);
-
-        var now = clock.UtcNow;
 
         var items = await ApplySort(tickets, query)
             .Skip((query.Page - 1) * query.PageSize)
@@ -44,7 +46,8 @@ public sealed class TicketQueries(SupportDbContext db, IClock clock) : ITicketQu
                 UpdatedAtUtc = x.Ticket.UpdatedAtUtc,
                 DueAtUtc = x.Ticket.DueAtUtc,
                 ResolvedAtUtc = x.Ticket.ResolvedAtUtc,
-                SlaStatus = SlaEvaluator.Evaluate(x.Ticket.DueAtUtc, x.Ticket.ResolvedAtUtc, now)
+                SlaStatus = SlaEvaluator.Evaluate(x.Ticket.DueAtUtc, x.Ticket.ResolvedAtUtc, now,
+                    x.Ticket.SlaWindowMilliseconds, _sla.AtRiskThresholdPercent)
             })
             .ToListAsync(ct);
 
@@ -73,7 +76,8 @@ public sealed class TicketQueries(SupportDbContext db, IClock clock) : ITicketQu
                 UpdatedAtUtc = x.Ticket.UpdatedAtUtc,
                 DueAtUtc = x.Ticket.DueAtUtc,
                 ResolvedAtUtc = x.Ticket.ResolvedAtUtc,
-                SlaStatus = SlaEvaluator.Evaluate(x.Ticket.DueAtUtc, x.Ticket.ResolvedAtUtc, now)
+                SlaStatus = SlaEvaluator.Evaluate(x.Ticket.DueAtUtc, x.Ticket.ResolvedAtUtc, now,
+                    x.Ticket.SlaWindowMilliseconds, _sla.AtRiskThresholdPercent)
             })
             .FirstOrDefaultAsync(ct);
     }
@@ -100,10 +104,59 @@ public sealed class TicketQueries(SupportDbContext db, IClock clock) : ITicketQu
                 UpdatedAtUtc = x.Ticket.UpdatedAtUtc,
                 DueAtUtc = x.Ticket.DueAtUtc,
                 ResolvedAtUtc = x.Ticket.ResolvedAtUtc,
-                SlaStatus = SlaEvaluator.Evaluate(x.Ticket.DueAtUtc, x.Ticket.ResolvedAtUtc, now)
+                SlaStatus = SlaEvaluator.Evaluate(x.Ticket.DueAtUtc, x.Ticket.ResolvedAtUtc, now,
+                    x.Ticket.SlaWindowMilliseconds, _sla.AtRiskThresholdPercent)
             })
             .ToListAsync(ct);
     }
+
+    public async Task<IReadOnlyList<AssignmentCandidate>> GetAssignmentCandidatesAsync(int categoryId, int? excludedTicketId, CancellationToken ct) =>
+        await db.Set<Agent>().AsNoTracking().Select(agent => new AssignmentCandidate(
+            agent.Id, agent.FullName, agent.IsActive,
+            db.Set<Ticket>().Count(ticket => ticket.AssignedAgentId == agent.Id
+                && ticket.Status != TicketStatus.Resolved && ticket.Status != TicketStatus.Closed
+                && (excludedTicketId == null || ticket.Id != excludedTicketId)),
+            agent.MaxOpenTickets, agent.Specializations.Any(s => s.CategoryId == categoryId))).ToListAsync(ct);
+
+    public async Task<IReadOnlyList<TicketEscalationDto>> GetEscalationsAsync(int ticketId, CancellationToken ct) =>
+        await (from row in db.Set<TicketEscalation>().AsNoTracking()
+               from before in db.Set<Agent>().Where(agent => agent.Id == row.FromAgentId).DefaultIfEmpty()
+               from after in db.Set<Agent>().Where(agent => agent.Id == row.ToAgentId).DefaultIfEmpty()
+               where row.TicketId == ticketId
+               orderby row.EscalatedAtUtc descending, row.Id descending
+               select new TicketEscalationDto
+               {
+                   Id = row.Id,
+                   TicketId = row.TicketId,
+                   FromPriority = row.FromPriority,
+                   ToPriority = row.ToPriority,
+                   FromAgent = before == null ? null : new AgentSummaryDto(before.Id, before.FullName),
+                   ToAgent = after == null ? null : new AgentSummaryDto(after.Id, after.FullName),
+                   FromDueAtUtc = row.FromDueAtUtc,
+                   ToDueAtUtc = row.ToDueAtUtc,
+                   Reason = row.Reason,
+                   EscalatedBy = row.EscalatedBy,
+                   EscalatedAtUtc = row.EscalatedAtUtc
+               }).ToListAsync(ct);
+
+    // Same cases as SlaEvaluator, expressed in SQL before counting and paging.
+    private static IQueryable<TicketWithLabels> ApplySlaFilter(IQueryable<TicketWithLabels> source,
+        SlaStatus status, DateTime now, double percent) => status switch
+        {
+            SlaStatus.NotApplicable => source.Where(x => x.Ticket.DueAtUtc == null),
+            SlaStatus.Met => source.Where(x => x.Ticket.DueAtUtc != null && x.Ticket.ResolvedAtUtc != null
+                && x.Ticket.ResolvedAtUtc <= x.Ticket.DueAtUtc),
+            SlaStatus.Breached => source.Where(x => x.Ticket.DueAtUtc != null
+                && ((x.Ticket.ResolvedAtUtc != null && x.Ticket.ResolvedAtUtc > x.Ticket.DueAtUtc)
+                    || (x.Ticket.ResolvedAtUtc == null && x.Ticket.DueAtUtc < now))),
+            SlaStatus.AtRisk => source.Where(x => x.Ticket.DueAtUtc != null && x.Ticket.ResolvedAtUtc == null
+                && x.Ticket.DueAtUtc >= now && x.Ticket.SlaWindowMilliseconds > 0
+                && now >= x.Ticket.DueAtUtc.Value.AddMilliseconds(-Math.Floor(x.Ticket.SlaWindowMilliseconds * percent / 100))),
+            SlaStatus.WithinSla => source.Where(x => x.Ticket.DueAtUtc != null && x.Ticket.ResolvedAtUtc == null
+                && x.Ticket.DueAtUtc >= now && (x.Ticket.SlaWindowMilliseconds <= 0
+                    || now < x.Ticket.DueAtUtc.Value.AddMilliseconds(-Math.Floor(x.Ticket.SlaWindowMilliseconds * percent / 100)))),
+            _ => source.Where(x => false)
+        };
 
     /// <summary>
     /// Every ticket with the rows that label it. Filter and sort this, then project.
